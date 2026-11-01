@@ -1,0 +1,322 @@
+name: Testing PrestaShop pull requests (fast)
+# Same campaigns as pr_test_one.yml, at a fraction of the runner time:
+# - the shop is installed once (build job) and shared as sources + SQL dump;
+# - each test job runs several isolated shops at once (one lane each) to use the 4 vCPU;
+# - long campaigns are split, campaigns are packed per lane by their measured duration;
+# - throwaway database tuning (datadir in RAM, no fsync/binlog), PHP opcache and Apache tuning;
+# - a failed campaign reruns only its failed spec files on a reset shop, inside the same job.
+on:
+  workflow_dispatch:
+    inputs:
+      PR_NUMBER:
+        description: Pull request Id
+        required: true
+      DB_SERVER:
+        type: choice
+        description: Database
+        required: true
+        options:
+          - 'mysql'
+          - 'mariadb'
+        default: 'mysql'
+      DEV_MODE:
+        type: boolean
+        description: Enable the developer mode
+        default: false
+      PHP_VERSION:
+        type: choice
+        description: PHP version (Auto = derived from PrestaShop version)
+        options: ['Auto', '8.1', '8.2', '8.3', '8.4', '8.5']
+        default: 'Auto'
+      NODE_VERSION:
+        type: choice
+        description: Node version (Auto = derived from PrestaShop version)
+        options: ['Auto', '20.19.5']
+        default: 'Auto'
+      LANES_PER_JOB:
+        type: choice
+        description: Shops running in parallel on each runner
+        options: ['1', '2', '3', '4']
+        default: '3'
+      RERUN_FAILED:
+        type: boolean
+        description: Rerun the failed spec files of a campaign once, on a reset shop
+        default: true
+      UI_TESTING_LIBRARY_REF:
+        description: Optional ui-testing-library to install instead of the locked one (e.g. github:owner/ui-testing-library#branch)
+        required: false
+        default: ''
+
+jobs:
+  prep:
+    name: Resolve PR context
+    uses: ./.github/workflows/prep-pr-context.yml
+    with:
+      PR_NUMBER: ${{ inputs.PR_NUMBER }}
+      PHP_VERSION: ${{ inputs.PHP_VERSION }}
+      NODE_VERSION: ${{ inputs.NODE_VERSION }}
+
+  build:
+    name: Build shop and plan the campaigns
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    env:
+      ROOT: ${{ github.workspace }}
+      CI_FAST_DIR: ${{ github.workspace }}/ga/ci/fast
+      DB_SERVER: ${{ inputs.DB_SERVER }}
+      PHP_VERSION: ${{ needs.prep.outputs.php_version }}
+      NODE_VERSION: ${{ needs.prep.outputs.node_version }}
+      PS_DEV_MODE: ${{ inputs.DEV_MODE && '1' || '0' }}
+    steps:
+      - name: Supported versions
+        if: needs.prep.outputs.ps_major < 9
+        run: |
+          echo "::error::This workflow supports PrestaShop 9.x and develop, use pr_test_one.yml for ${{ needs.prep.outputs.ps_version }}"
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          path: ga
+
+      # Blob-less clone: full history for the rebase, file contents fetched only when needed.
+      - name: Checkout PrestaShop pull request
+        uses: actions/checkout@v5
+        with:
+          repository: PrestaShop/PrestaShop
+          ref: refs/pull/${{ inputs.PR_NUMBER }}/head
+          fetch-depth: 0
+          filter: blob:none
+          path: pristine
+
+      - name: Rebase or merge on ${{ needs.prep.outputs.base_branch }}
+        working-directory: pristine
+        run: |
+          git config user.email "$(git log --format='%ae' HEAD^!)"
+          git config user.name "$(git log --format='%an' HEAD^!)"
+          git fetch origin ${{ needs.prep.outputs.base_branch }}
+          git ${{ needs.prep.outputs.rebase_or_merge }} origin/${{ needs.prep.outputs.base_branch }}
+
+      - name: Check the campaign splits and plan the jobs
+        id: plan
+        run: |
+          python3 ga/ci/fast/check_splits.py pristine/tests/UI ga/ci/fast/campaigns.json
+          MATRIX=$(python3 ga/ci/fast/plan.py '${{ needs.prep.outputs.campaigns }}' ga/ci/fast/campaigns.json ${{ inputs.LANES_PER_JOB }} 0)
+          echo "$MATRIX" | jq .
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+      # Started now, used at the end: the shop image and the database image.
+      - name: Build docker images in background
+        run: |
+          docker pull -q "$(awk -v svc="  $DB_SERVER:" '$0 == svc {f=1; next} f && /image:/ {gsub(/["\x27]/, "", $2); print $2; exit}' pristine/docker-compose$([ "$DB_SERVER" = mariadb ] && echo .mariadb).yml)" > /tmp/db-pull.log 2>&1 &
+          LANE_DIR=$ROOT/pristine DB_IMAGE=none DB_FLAGS=--help DB_DATADIR=/tmp HTTP_HOST_PORT=8001 HTTPS_HOST_PORT=8002 NETWORK_NAME=x \
+            USER_ID=$(id -u) GROUP_ID=$(id -g) \
+            nohup docker compose -p psbuild -f ga/ci/fast/docker-compose.ci.yml build prestashop-git > /tmp/image-build.log 2>&1 &
+
+      - name: Restore composer cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/composer
+          key: composer-${{ hashFiles('pristine/composer.lock') }}
+          restore-keys: composer-
+      - name: Composer install
+        working-directory: pristine
+        run: composer install --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ needs.prep.outputs.node_version }}
+      # node_modules themselves, keyed on every lock file: a cache hit skips all `npm ci`.
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            pristine/admin-dev/themes/new-theme/node_modules
+            pristine/admin-dev/themes/default/node_modules
+            pristine/themes/classic/_dev/node_modules
+            pristine/themes/hummingbird/node_modules
+            pristine/themes/node_modules
+          key: assets-nm-${{ needs.prep.outputs.node_version }}-${{ hashFiles('pristine/admin-dev/themes/*/package-lock.json', 'pristine/themes/package-lock.json', 'pristine/themes/*/package-lock.json', 'pristine/themes/*/_dev/package-lock.json') }}
+      - name: Restore tests/UI node_modules
+        id: ui-node-modules
+        uses: actions/cache@v4
+        with:
+          path: pristine/tests/UI/node_modules
+          key: ui-nm-${{ needs.prep.outputs.node_version }}-${{ hashFiles('pristine/tests/UI/package-lock.json') }}
+
+      - name: Build assets and install test dependencies in parallel
+        working-directory: pristine
+        run: |
+          pids=(); names=()
+          for d in admin-dev/themes/new-theme admin-dev/themes/default themes/classic/_dev themes/hummingbird themes; do
+            [ -f "$d/package.json" ] || continue
+            ( cd "$d" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build ) > "/tmp/assets-${d//\//_}.log" 2>&1 &
+            pids+=($!); names+=("$d")
+          done
+          ( cd tests/UI && { [ -d node_modules ] || npm ci --no-audit --no-fund; } ) > /tmp/assets-tests-ui.log 2>&1 &
+          pids+=($!); names+=(tests/UI)
+          fail=0
+          for i in "${!pids[@]}"; do
+            if wait "${pids[$i]}"; then echo "OK   ${names[$i]}"; else echo "FAIL ${names[$i]}"; tail -40 "/tmp/assets-${names[$i]//\//_}.log"; fail=1; fi
+          done
+          exit $fail
+
+      - name: Generate a certificate
+        run: |
+          curl --retry 5 --retry-all-errors -sSL -o mkcert "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert && sudo mv mkcert /usr/local/bin/mkcert
+          mkcert -key-file pristine/.docker/ssl.key -cert-file pristine/.docker/ssl.crt localhost
+
+      - name: Install the shop and export it
+        run: |
+          wait_bg() { while pgrep -f "$1" > /dev/null; do sleep 2; done; }
+          wait_bg "docker compose -p psbuild" ; cat /tmp/image-build.log | tail -5
+          bash ga/ci/fast/build-shop.sh
+
+      - name: Upload shop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: shop-artifacts
+          path: shop-artifacts
+          compression-level: 0
+          retention-days: 3
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            /tmp/*.log
+            pristine/var/logs
+
+  test:
+    name: Lanes ${{ matrix.job }} (~${{ matrix.estimate }} min)
+    needs: [prep, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build.outputs.matrix) }}
+    env:
+      ROOT: ${{ github.workspace }}
+      CI_FAST_DIR: ${{ github.workspace }}/ga/ci/fast
+      DB_SERVER: ${{ inputs.DB_SERVER }}
+      PHP_VERSION: ${{ needs.prep.outputs.php_version }}
+      NODE_VERSION: ${{ needs.prep.outputs.node_version }}
+      PS_VERSION: ${{ needs.prep.outputs.branch_key }}
+      PS_DEV_MODE: ${{ inputs.DEV_MODE && '1' || '0' }}
+      RERUN_FAILED: ${{ inputs.RERUN_FAILED && '1' || '0' }}
+      KEYCLOAK: ${{ matrix.keycloak }}
+      CLIENT_ID_API: ui-test-client
+      CLIENT_SECRET_API: 18c7b983c2eaa22a111609ce2b1c435e
+      # Test runner settings (exported values win over tests/UI/.env)
+      HEADLESS: 'true'
+      ENABLE_SSL: 'true'
+      BROWSER: chromium
+      LANG: en-GB
+      SLOW_MO: '0'
+      TAKE_SCREENSHOT_AFTER_FAIL: 'true'
+      TAKE_SCREENSHOT_AFTER_EACH_STEP: 'false'
+    steps:
+      - name: Start resource monitor
+        run: |
+          mkdir -p /tmp/mon
+          nohup vmstat -n -t 5 > /tmp/mon/vmstat.log 2>&1 &
+          nohup sh -c 'while :; do echo "## $(date +%T) load $(cut -d" " -f1-3 /proc/loadavg)"; free -m | sed -n 2p; docker stats --no-stream --format "{{.Name}} {{.CPUPerc}} {{.MemUsage}}" 2>/dev/null; sleep 15; done' > /tmp/mon/stats.log 2>&1 &
+
+      - uses: actions/checkout@v5
+        with:
+          path: ga
+
+      - name: Download shop artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: shop-artifacts
+          path: shop-artifacts
+
+      - name: Extract shop sources
+        run: mkdir pristine && tar -C pristine --zstd -xf shop-artifacts/sources.tar.zst
+
+      - name: Build shop image and pull database image in background
+        run: |
+          DB_IMAGE=$(awk -v svc="  $DB_SERVER:" '$0 == svc {f=1; next} f && /image:/ {gsub(/["\x27]/, "", $2); print $2; exit}' pristine/docker-compose$([ "$DB_SERVER" = mariadb ] && echo .mariadb).yml)
+          nohup docker pull -q "$DB_IMAGE" > /tmp/db-pull.log 2>&1 &
+          LANE_DIR=$ROOT/pristine DB_IMAGE=none DB_FLAGS=--help DB_DATADIR=/tmp HTTP_HOST_PORT=8001 HTTPS_HOST_PORT=8002 NETWORK_NAME=x \
+            USER_ID=$(id -u) GROUP_ID=$(id -g) \
+            nohup docker compose -p psimage -f ga/ci/fast/docker-compose.ci.yml build prestashop-git > /tmp/image-build.log 2>&1 &
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ needs.prep.outputs.node_version }}
+      - name: Restore tests/UI node_modules
+        id: ui-node-modules
+        uses: actions/cache/restore@v4
+        with:
+          path: pristine/tests/UI/node_modules
+          key: ui-nm-${{ needs.prep.outputs.node_version }}-${{ hashFiles('pristine/tests/UI/package-lock.json') }}
+      - name: Install test dependencies
+        working-directory: pristine/tests/UI
+        run: |
+          [ -d node_modules ] || npm ci --no-audit --no-fund
+          if [ -n "${{ inputs.UI_TESTING_LIBRARY_REF }}" ]; then
+            npm install --no-save --no-audit --no-fund "@prestashop-core/ui-testing@${{ inputs.UI_TESTING_LIBRARY_REF }}"
+          fi
+          # The mail sink of every test process opens a fixed web UI port: two lanes would collide.
+          for f in $(grep -rl "web: 1081" node_modules/@prestashop-core/ui-testing/dist 2>/dev/null); do
+            sed -i 's/web: 1081,/disableWeb: true,/' "$f" && echo "Patched maildev web port in $f"
+          done
+      - name: Restore Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ hashFiles('pristine/tests/UI/node_modules/playwright-core/package.json') }}
+      - name: Install Chromium
+        working-directory: pristine/tests/UI
+        run: npx playwright install chromium
+
+      - name: Generate a certificate
+        run: |
+          curl --retry 5 --retry-all-errors -sSL -o mkcert "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert && sudo mv mkcert /usr/local/bin/mkcert
+          # Chromium checks certificates (the test library only ignores HTTPS errors on Firefox):
+          # the mkcert CA must be in the NSS database.
+          command -v certutil > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq libnss3-tools; }
+          mkdir -p "$HOME/.pki/nssdb"
+          [ -f "$HOME/.pki/nssdb/cert9.db" ] || certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
+          mkcert -install
+          mkcert -key-file pristine/.docker/ssl.key -cert-file pristine/.docker/ssl.crt localhost
+
+      - name: Checkout keycloak
+        if: matrix.keycloak
+        uses: actions/checkout@v5
+        with:
+          repository: PrestaShop/keycloak_connector_demo
+          ref: v1.1.0
+          path: keycloak_connector_demo
+
+      - name: Run the lanes
+        run: bash ga/ci/fast/lanes.sh "${{ matrix.lanes }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Job ${{ matrix.job }}"
+            cat results/summary.md 2>/dev/null || echo "No results"
+            echo
+            awk 'NR>2 && $1 ~ /^[0-9]+$/ {n++; r+=$1; us+=$13; sy+=$14; id+=$15; wa+=$16; if($1>m) m=$1}
+                 END {if (n) printf "CPU: run queue avg %.1f / max %d, user %.0f%%, system %.0f%%, idle %.0f%%, iowait %.0f%%\n", r/n, m, us/n, sy/n, id/n, wa/n}' /tmp/mon/vmstat.log
+          } >> "$GITHUB_STEP_SUMMARY"
+          cp -r /tmp/mon results/monitor 2>/dev/null || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-job${{ matrix.job }}-attempt${{ github.run_attempt }}
+          path: results
+          retention-days: 7
