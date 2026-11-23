@@ -27,9 +27,10 @@ sudo rm -rf "$DB_DATADIR" && mkdir -p "$DB_DATADIR"
 dc up -d --wait db
 dc up -d prestashop-git
 echo "Waiting for the installed shop"
-# Probes use a crawler user agent: the shop logs no connection for bots, and the dashboard tests
-# only read the first three connections.
-timeout 900 bash -c 'until [ "$(curl -sk -L -A Googlebot -o /dev/null -w "%{http_code}" https://localhost:8002/en/)" = 200 ]; do
+# Apache only starts once the shop is installed: the first answer is the single direct visit that
+# pr_test_one leaves in the database too. The dashboard tests read the first three connections,
+# so every other probe uses a crawler user agent, for which the shop logs no connection.
+timeout 900 bash -c 'until [ "$(curl -sk -L -o /dev/null -w "%{http_code}" https://localhost:8002/en/)" = 200 ]; do
   if ! docker compose -p psbuild -f "$CI_FAST_DIR/docker-compose.ci.yml" ps --status running prestashop-git | grep -q prestashop-git; then exit 1; fi
   sleep 3; done' || { dc logs --no-color prestashop-git | tail -100; exit 1; }
 

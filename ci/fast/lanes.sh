@@ -141,7 +141,7 @@ run_mocha() {   # $1 = report name, rest = spec files (none: the whole campaign)
 
 run_lane() {
   lane_env "$1"
-  local campaigns=$2 dirty=1 rc status files whole t0 slug fresh api shop_api=0
+  local campaigns=$2 rc status files whole t0 slug fresh
   [ -n "$campaigns" ] || return 0
   IFS=',' read -ra CAMPS <<< "$campaigns"
 
@@ -156,16 +156,12 @@ run_lane() {
     GLOB=$(split_glob "$CAMPAIGN")
     fresh=0; in_list fresh_install "$CAMPAIGN" && fresh=1
     t0=$SECONDS
-    # The API client only exists for the campaigns that need it: the others count the API clients.
-    api=0; in_list needs_api_client "$CAMPAIGN" && api=1
-    [ $api = $shop_api ] || dirty=1
-    shop_api=$api
-    if [ $dirty = 1 ] || [ $fresh = 1 ]; then
-      log "starting shop for $CAMPAIGN"
-      if ! start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
-        printf '%s\t%s\tsetup-failed\t0\t0\t0\t0\n' "$K" "$CAMPAIGN" >> "$RESULTS/lane-$K.tsv"
-        dirty=1; continue
-      fi
+    # Every campaign starts on a pristine shop, as in pr_test_one: campaigns leave orders, carts,
+    # subscriptions... behind them, and a reset only takes about 10 seconds.
+    log "starting shop for $CAMPAIGN"
+    if ! start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
+      printf '%s\t%s\tsetup-failed\t0\t0\t0\t0\n' "$K" "$CAMPAIGN" >> "$RESULTS/lane-$K.tsv"
+      continue
     fi
     if in_list needs_keycloak "$CAMPAIGN"; then
       timeout 300 bash -c 'until curl -s -o /dev/null http://localhost:8003/; do sleep 3; done'
@@ -187,9 +183,20 @@ run_lane() {
           mapfile -t specs <<< "$files"
           run_mocha rerun "${specs[@]}" >> "$RESULTS/lane-$K-$slug.log" 2>&1
         else
+          whole=2
           run_mocha rerun >> "$RESULTS/lane-$K-$slug.log" 2>&1
         fi
         [ $? = 0 ] && status=flaky
+      fi
+      # A spec file may depend on the files run before it: before reporting a failure, rerun the
+      # whole campaign once, which is what a retry of pr_test_one does.
+      if [ $status = failed ] && [ $whole = 0 ]; then
+        collect "$RESULTS/$slug/files-rerun"
+        log "$CAMPAIGN still failing, rerunning the whole campaign on a fresh shop"
+        if start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
+          rm -rf "$DIR/tests/UI/reports" "$DIR/tests/UI/screenshots"
+          run_mocha rerun >> "$RESULTS/lane-$K-$slug.log" 2>&1 && status=flaky
+        fi
       fi
     fi
 
@@ -198,8 +205,6 @@ run_lane() {
     [ -f "$DIR/tests/UI/reports/rerun.json" ] && report="$DIR/tests/UI/reports/rerun.json"
     printf '%s\t%s\t%s\t%s\t%s\n' "$K" "$CAMPAIGN" "$status" "$(( (SECONDS - t0) / 60 ))" "$(report_stats "$report")" >> "$RESULTS/lane-$K.tsv"
     log "$CAMPAIGN $status in $(( (SECONDS - t0) / 60 )) min"
-    # Reuse the shop as is after a clean pass (the suites restore their own state, like the nightly).
-    dirty=$([ "$status" = passed ] && [ $fresh = 0 ] && echo 0 || echo 1)
   done
   dc rm -s -f > /dev/null 2>&1
 }
