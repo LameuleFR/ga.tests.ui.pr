@@ -89,7 +89,9 @@ start_stack() {
   sudo rm -rf "$DATADIR"
   if [ "$mode" = fresh ]; then
     mkdir -p "$DATADIR"
-    rm -f "$DIR/app/config/parameters.php" "$DIR/app/config/parameters.yml"
+    # Back to sources that were never installed: no settings, no compiled container, no rewrite rules.
+    rm -f "$DIR/app/config/parameters.php" "$DIR/app/config/parameters.yml" "$DIR/.htaccess"
+    rm -rf "$DIR/var/cache"/*
     export PS_INSTALL_AUTO=0
     ping="${URL_INSTALL}"
   else
@@ -100,7 +102,7 @@ start_stack() {
   dc up -d --wait db || return 1
   dc up -d --no-build prestashop-git || return 1
   timeout 300 bash -c "until [ \"\$(curl -sk -L -o /dev/null -w '%{http_code}' '$ping')\" = 200 ]; do sleep 2; done" || return 1
-  if [ "$mode" = installed ] && [ -n "$NEEDS_API_CLIENT" ]; then
+  if [ "$mode" = installed ] && in_list needs_api_client "$CAMPAIGN"; then
     dc exec -T -u www-data prestashop-git php bin/console prestashop:api-client create "$CLIENT_ID_API" --all-scopes \
       --name='Test client' --description='Test client with all scopes' --timeout=3600 --secret="$CLIENT_SECRET_API" || return 1
   fi
@@ -138,11 +140,9 @@ run_mocha() {   # $1 = report name, rest = spec files (none: the whole campaign)
 
 run_lane() {
   lane_env "$1"
-  local campaigns=$2 dirty=1 rc status files whole t0 slug fresh
+  local campaigns=$2 dirty=1 rc status files whole t0 slug fresh api shop_api=0
   [ -n "$campaigns" ] || return 0
-  NEEDS_API_CLIENT=""
   IFS=',' read -ra CAMPS <<< "$campaigns"
-  for c in "${CAMPS[@]}"; do in_list needs_api_client "$c" && NEEDS_API_CLIENT=1; done
 
   log "preparing (${campaigns})"
   if ! prepare_lane > "$RESULTS/lane-$K-prepare.log" 2>&1; then
@@ -155,6 +155,10 @@ run_lane() {
     GLOB=$(split_glob "$CAMPAIGN")
     fresh=0; in_list fresh_install "$CAMPAIGN" && fresh=1
     t0=$SECONDS
+    # The API client only exists for the campaigns that need it: the others count the API clients.
+    api=0; in_list needs_api_client "$CAMPAIGN" && api=1
+    [ $api = $shop_api ] || dirty=1
+    shop_api=$api
     if [ $dirty = 1 ] || [ $fresh = 1 ]; then
       log "starting shop for $CAMPAIGN"
       if ! start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
