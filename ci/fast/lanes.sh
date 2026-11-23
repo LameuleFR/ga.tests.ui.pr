@@ -231,6 +231,26 @@ cat "$RESULTS"/lane-*.tsv > "$RESULTS/summary.tsv" 2>/dev/null
                printf "| %s | `%s` | %s | %s | %s | %s | %s |\n", $1, $2, icon, $4, $5, $6, $7}' "$RESULTS/summary.tsv"
 } > "$RESULTS/summary.md"
 cat "$RESULTS/summary.md"
+
+# Diagnostics in the job log, so that a run can be analysed without downloading its artifacts.
+for d in "$RESULTS"/*/; do
+  c=$(basename "$d")
+  if [ -f "$d/first-run/run.json" ]; then
+    echo "--- $c: failures of the first run"
+    node "$CI_FAST_DIR/print-failures.js" "$d/first-run/run.json"
+  fi
+  final="$d/rerun.json"; [ -f "$final" ] || final="$d/run.json"
+  if [ -f "$final" ] && [ "$(jq -r '.stats.failures // 0' "$final")" != 0 ]; then
+    echo "--- $c: failures of the final report"
+    node "$CI_FAST_DIR/print-failures.js" "$final"
+  fi
+  for timing in "$d/first-run/var-logs/apache-timing.log" "$d/var-logs/apache-timing.log"; do
+    [ -f "$timing" ] && awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s\n", c, $NF / 1000000, $3, substr($4, 1, 90)}' "$timing"
+  done
+done
+awk 'NR > 2 && $1 ~ /^[0-9]+$/ {n++; r += $1; id += $15; if ($1 > m) m = $1}
+     END {if (n) printf "--- CPU: run queue avg %.1f / max %d, idle %.0f%%\n", r / n, m, id / n}' /tmp/mon/vmstat.log 2>/dev/null
+
 expected=0; for l in "${LANES[@]}"; do IFS=',' read -ra cs <<< "$l"; expected=$((expected + ${#cs[@]})); done
 got=$(wc -l < "$RESULTS/summary.tsv")
 [ "$got" = "$expected" ] || { echo "::error::$got results for $expected campaigns"; exit 1; }
