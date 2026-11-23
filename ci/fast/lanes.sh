@@ -122,6 +122,10 @@ run_mocha() {   # $1 = report name, rest = spec files (none: the whole campaign)
     cd "$DIR/tests/UI" || exit 1
     export MOCHAWESOME_REPORTDIR="$DIR/tests/UI/reports" MOCHAWESOME_REPORTFILENAME="$name"
     export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
+    # First run only: the rerun reports every failure of the files it runs.
+    if [ "$name" = run ] && [ "${RERUN_FAILED:-1}" = 1 ]; then
+      export EXTRA_TEST_PARAMS="--file $CI_FAST_DIR/skip-after-failure.js"
+    fi
     if [ $# -gt 0 ]; then
       timeout 75m npx ts-mocha --file utils/setup.ts "$@"
     elif [ -n "$GLOB" ]; then

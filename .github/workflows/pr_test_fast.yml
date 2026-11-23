@@ -128,9 +128,27 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ needs.prep.outputs.node_version }}
+      # Built assets, keyed on everything they are built from: the asset sources of the core
+      # (git trees) and the themes installed by composer. Most pull requests only touch PHP.
+      - name: Key of the built assets
+        id: assets-key
+        working-directory: pristine
+        run: |
+          KEY=$({
+            for p in admin-dev/themes themes js tools/assets; do git rev-parse -q --verify "HEAD:$p" || true; done
+            sha256sum composer.lock
+          } | sha256sum | cut -c1-40)
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+      - name: Restore built assets
+        id: assets
+        uses: actions/cache@v4
+        with:
+          path: assets-built.tar.zst
+          key: assets-built-${{ needs.prep.outputs.node_version }}-${{ steps.assets-key.outputs.key }}
       # node_modules themselves, keyed on every lock file: a cache hit skips all `npm ci`.
       - name: Restore node_modules
         id: node-modules
+        if: steps.assets.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -151,7 +169,16 @@ jobs:
         working-directory: pristine
         run: |
           pids=(); names=()
-          for d in admin-dev/themes/new-theme admin-dev/themes/default themes/classic/_dev themes/hummingbird themes; do
+          ASSETS=../assets-built.tar.zst
+          if [ -f "$ASSETS" ]; then
+            echo "Built assets restored from the cache"
+            tar --zstd -xf "$ASSETS"
+            DIRS=""
+          else
+            DIRS="admin-dev/themes/new-theme admin-dev/themes/default themes/classic/_dev themes/hummingbird themes"
+            touch /tmp/assets-build-start
+          fi
+          for d in $DIRS; do
             [ -f "$d/package.json" ] || continue
             ( cd "$d" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build ) > "/tmp/assets-${d//\//_}.log" 2>&1 &
             pids+=($!); names+=("$d")
@@ -162,6 +189,12 @@ jobs:
           for i in "${!pids[@]}"; do
             if wait "${pids[$i]}"; then echo "OK   ${names[$i]}"; else echo "FAIL ${names[$i]}"; tail -40 "/tmp/assets-${names[$i]//\//_}.log"; fail=1; fi
           done
+          # Cache exactly what the builds wrote, whatever the version's output folders are.
+          if [ $fail = 0 ] && [ -n "$DIRS" ]; then
+            find admin-dev/themes themes -type f -newer /tmp/assets-build-start -not -path '*/node_modules/*' -print0 \
+              | tar --zstd -cf "$ASSETS" --null -T -
+            ls -lh "$ASSETS"
+          fi
           exit $fail
 
       - name: Generate a certificate
