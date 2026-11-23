@@ -65,6 +65,10 @@ sync_sources() {
   # Real per-lane copy: the test library resolves the shop root from its own location.
   [ -d "$DIR/tests/UI/node_modules" ] || cp -al "$ROOT/pristine/tests/UI/node_modules" "$DIR/tests/UI/node_modules"
   cp "$DIR/tests/UI/.env.ci" "$DIR/tests/UI/.env"
+  # The rewrite rules of the installed shop (images, friendly URLs) only match its own host.
+  if [ -f "$DIR/.htaccess" ]; then
+    sed -i "s/localhost:8002/localhost:${HTTPS_HOST_PORT}/g" "$DIR/.htaccess"
+  fi
 }
 
 # Installed shop database for this lane, kept as a datadir snapshot in RAM for fast resets.
