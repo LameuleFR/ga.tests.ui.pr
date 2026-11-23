@@ -254,9 +254,14 @@ for d in "$RESULTS"/*/; do
     node "$CI_FAST_DIR/print-failures.js" "$final"
   fi
   for timing in "$d/first-run/var-logs/apache-timing.log" "$d/var-logs/apache-timing.log"; do
-    [ -f "$timing" ] && awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s\n", c, $NF / 1000000, $3, substr($4, 1, 90)}' "$timing"
+    [ -f "$timing" ] || continue
+    awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s\n", c, $NF / 1000000, $3, substr($4, 1, 90)}' "$timing"
+    # The 3 slowest requests whatever their duration, to measure the margin below the test timeouts
+    awk '{printf "%d\t%s\t%s\n", $NF, $3, substr($4, 1, 90)}' "$timing" | sort -rn | head -3 \
+      | awk -F'\t' -v c="$c" '{printf "--- %s: slowest %.1fs %s %s\n", c, $1 / 1000000, $2, $3}'
   done
 done
+echo "--- runner: $(nproc) CPUs, $(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
 awk 'NR > 2 && $1 ~ /^[0-9]+$/ {n++; r += $1; id += $15; wa += $16; st += $17; if ($1 > m) m = $1}
      END {if (n) printf "--- CPU: run queue avg %.1f / max %d, idle %.0f%%, iowait %.0f%%, steal %.0f%%\n", r / n, m, id / n, wa / n, st / n}' /tmp/mon/vmstat.log 2>/dev/null
 echo "--- /dev/shm: $(df -h /dev/shm | tail -1)"
