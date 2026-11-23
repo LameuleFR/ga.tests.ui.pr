@@ -37,7 +37,7 @@ on:
         type: choice
         description: Shops running in parallel on each runner
         options: ['1', '2', '3', '4']
-        default: '3'
+        default: '4'
       RERUN_FAILED:
         type: boolean
         description: Rerun the failed spec files of a campaign once, on a reset shop
