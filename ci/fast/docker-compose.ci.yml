@@ -4,6 +4,7 @@
 #
 # Required env: LANE_DIR (shop sources), DB_SERVER (mysql|mariadb), DB_IMAGE, DB_FLAGS,
 # HTTP_HOST_PORT, HTTPS_HOST_PORT, NETWORK_NAME, DB_DATADIR, CI_FAST_DIR, PHP_VERSION.
+# Optional: CACHE_DIR (var/cache of the shop, default inside LANE_DIR).
 services:
   db:
     image: ${DB_IMAGE}
@@ -76,6 +77,9 @@ services:
       - ${HTTPS_HOST_PORT}:443
     volumes:
       - ${LANE_DIR}:/var/www/html
+      # Test lanes keep the Symfony cache in RAM (cache clears rewrite thousands of files);
+      # the build job keeps it in the sources it exports.
+      - ${CACHE_DIR:-${LANE_DIR}/var/cache}:/var/www/html/var/cache
       - ${CI_FAST_DIR}/php/zz-ci-perf.ini:/usr/local/etc/php/conf.d/zz-ci-perf.ini:ro
       - ${CI_FAST_DIR}/apache/zz-ci-perf.conf:/etc/apache2/conf-enabled/zz-ci-perf.conf:ro
     tmpfs:

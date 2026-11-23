@@ -64,3 +64,4 @@ tar -C "$ROOT/pristine" --zstd -cf "$ROOT/shop-artifacts/sources.tar.zst" \
   --exclude='./.docker/ssl.key' --exclude='./.docker/ssl.crt' \
   .
 ls -lh "$ROOT/shop-artifacts"
+du -sh "$ROOT/pristine/var/cache"/* || true

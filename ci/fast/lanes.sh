@@ -44,7 +44,7 @@ lane_env() {
   DIR="$ROOT/lanes/$P"
   DATADIR="/dev/shm/ps-db-$K"
   SNAPSHOT="/dev/shm/ps-db-$K.pristine"
-  export LANE_DIR="$DIR" DB_DATADIR="$DATADIR"
+  export LANE_DIR="$DIR" DB_DATADIR="$DATADIR" CACHE_DIR="/dev/shm/ps-cache-$K"
   export HTTP_HOST_PORT="80${K}1" HTTPS_HOST_PORT="80${K}2"
   if [ "$K" = 0 ]; then
     export NETWORK_NAME=prestashop-network DB_HOST_PORT=3306
@@ -61,7 +61,10 @@ db_exec() { dc exec -T db "$DB_CLI" -uroot -pprestashop "$@"; }
 
 sync_sources() {
   mkdir -p "$DIR"
-  rsync -a --delete --exclude /tests/UI/node_modules --exclude /tests/UI/.env "$ROOT/pristine/" "$DIR/"
+  rsync -a --delete --exclude /tests/UI/node_modules --exclude /tests/UI/.env --exclude /var/cache "$ROOT/pristine/" "$DIR/"
+  # var/cache is mounted from RAM: the cache clears of BO actions time out on a slow runner disk.
+  mkdir -p "$DIR/var/cache" "$CACHE_DIR"
+  rsync -a --delete "$ROOT/pristine/var/cache/" "$CACHE_DIR/"
   # Real per-lane copy: the test library resolves the shop root from its own location.
   [ -d "$DIR/tests/UI/node_modules" ] || cp -al "$ROOT/pristine/tests/UI/node_modules" "$DIR/tests/UI/node_modules"
   cp "$DIR/tests/UI/.env.ci" "$DIR/tests/UI/.env"
@@ -91,7 +94,7 @@ start_stack() {
     mkdir -p "$DATADIR"
     # Back to sources that were never installed: no settings, no compiled container, no rewrite rules.
     rm -f "$DIR/app/config/parameters.php" "$DIR/app/config/parameters.yml" "$DIR/.htaccess"
-    rm -rf "$DIR/var/cache"/*
+    rm -rf "$CACHE_DIR"/*
     export PS_INSTALL_AUTO=0
     ping="${URL_INSTALL}"
   else
@@ -254,8 +257,10 @@ for d in "$RESULTS"/*/; do
     [ -f "$timing" ] && awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s\n", c, $NF / 1000000, $3, substr($4, 1, 90)}' "$timing"
   done
 done
-awk 'NR > 2 && $1 ~ /^[0-9]+$/ {n++; r += $1; id += $15; if ($1 > m) m = $1}
-     END {if (n) printf "--- CPU: run queue avg %.1f / max %d, idle %.0f%%\n", r / n, m, id / n}' /tmp/mon/vmstat.log 2>/dev/null
+awk 'NR > 2 && $1 ~ /^[0-9]+$/ {n++; r += $1; id += $15; wa += $16; st += $17; if ($1 > m) m = $1}
+     END {if (n) printf "--- CPU: run queue avg %.1f / max %d, idle %.0f%%, iowait %.0f%%, steal %.0f%%\n", r / n, m, id / n, wa / n, st / n}' /tmp/mon/vmstat.log 2>/dev/null
+echo "--- /dev/shm: $(df -h /dev/shm | tail -1)"
+du -sh /dev/shm/ps-cache-* 2>/dev/null | sed 's/^/--- cache size: /'
 
 expected=0; for l in "${LANES[@]}"; do IFS=',' read -ra cs <<< "$l"; expected=$((expected + ${#cs[@]})); done
 got=$(wc -l < "$RESULTS/summary.tsv")
