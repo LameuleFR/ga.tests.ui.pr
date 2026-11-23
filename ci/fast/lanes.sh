@@ -257,7 +257,7 @@ for d in "$RESULTS"/*/; do
     [ -f "$timing" ] || continue
     awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s\n", c, $NF / 1000000, $3, substr($4, 1, 90)}' "$timing"
     # The 3 slowest requests whatever their duration, to measure the margin below the test timeouts
-    awk '{printf "%d\t%s\t%s\n", $NF, $3, substr($4, 1, 90)}' "$timing" | sort -rn | head -3 \
+    awk '{printf "%d\t%s\t%s\n", $NF, $3, substr($4, 1, 90)}' "$timing" | sort -rn | awk 'NR <= 3' \
       | awk -F'\t' -v c="$c" '{printf "--- %s: slowest %.1fs %s %s\n", c, $1 / 1000000, $2, $3}'
   done
 done
