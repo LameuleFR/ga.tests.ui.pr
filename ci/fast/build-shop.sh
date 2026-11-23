@@ -27,7 +27,9 @@ sudo rm -rf "$DB_DATADIR" && mkdir -p "$DB_DATADIR"
 dc up -d --wait db
 dc up -d prestashop-git
 echo "Waiting for the installed shop"
-timeout 900 bash -c 'until [ "$(curl -sk -L -o /dev/null -w "%{http_code}" https://localhost:8002/en/)" = 200 ]; do
+# Probes use a crawler user agent: the shop logs no connection for bots, and the dashboard tests
+# only read the first three connections.
+timeout 900 bash -c 'until [ "$(curl -sk -L -A Googlebot -o /dev/null -w "%{http_code}" https://localhost:8002/en/)" = 200 ]; do
   if ! docker compose -p psbuild -f "$CI_FAST_DIR/docker-compose.ci.yml" ps --status running prestashop-git | grep -q prestashop-git; then exit 1; fi
   sleep 3; done' || { dc logs --no-color prestashop-git | tail -100; exit 1; }
 
@@ -38,8 +40,8 @@ for app in admin front admin-api; do
     || echo "::warning::cache warmup failed for $app"
 done
 # Front and back office pages once, to fill the Smarty/asset caches the same way for everyone.
-curl -sk -o /dev/null https://localhost:8002/en/ || true
-curl -sk -o /dev/null https://localhost:8002/admin-dev/ || true
+curl -sk -A Googlebot -o /dev/null https://localhost:8002/en/ || true
+curl -sk -A Googlebot -o /dev/null https://localhost:8002/admin-dev/ || true
 
 mkdir -p "$ROOT/shop-artifacts"
 dc exec -T db $DUMP -uroot -pprestashop --single-transaction --skip-dump-date prestashop > "$ROOT/shop-artifacts/db_dump.sql"

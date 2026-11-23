@@ -101,7 +101,8 @@ start_stack() {
   fi
   dc up -d --wait db || return 1
   dc up -d --no-build prestashop-git || return 1
-  timeout 300 bash -c "until [ \"\$(curl -sk -L -o /dev/null -w '%{http_code}' '$ping')\" = 200 ]; do sleep 2; done" || return 1
+  # Crawler user agent: no connection logged, see build-shop.sh.
+  timeout 300 bash -c "until [ \"\$(curl -sk -L -A Googlebot -o /dev/null -w '%{http_code}' '$ping')\" = 200 ]; do sleep 2; done" || return 1
   if [ "$mode" = installed ] && in_list needs_api_client "$CAMPAIGN"; then
     dc exec -T -u www-data prestashop-git php bin/console prestashop:api-client create "$CLIENT_ID_API" --all-scopes \
       --name='Test client' --description='Test client with all scopes' --timeout=3600 --secret="$CLIENT_SECRET_API" || return 1
