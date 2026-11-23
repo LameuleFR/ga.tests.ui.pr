@@ -1,5 +1,5 @@
 {
-  "_doc": "Test minutes per campaign (pr_test_one median job duration minus ~5.6 min of setup, stats branch, Aug-Oct 2026). Used only to balance lanes; unknown campaigns count as default_minutes. 'splits' replace a long campaign by several TEST_PATH globs whose union must equal the original glob (checked at run time). 'slot0' campaigns must run on lane 0 of a job: they hard-code localhost:8002, localhost:3306 or need the single keycloak of the runner.",
+  "_doc": "Test minutes per campaign (pr_test_one median job duration minus ~5.6 min of setup, stats branch, Aug-Oct 2026). Used only to balance lanes; unknown campaigns count as default_minutes. 'splits' replace a long campaign by several TEST_PATH globs whose union must equal the original glob (checked at run time). 'slot0' campaigns must run on lane 0 of a job: they hard-code localhost:8002, localhost:3306, the 172.18.0.1 gateway of the first docker network, or need the single keycloak of the runner.",
   "default_minutes": 15,
   "minutes": {
     "audit": 13.6,
@@ -68,6 +68,7 @@
   "slot0": [
     "functional:API:a",
     "functional:BO:catalog:07-08-rest",
+    "functional:BO:international:01",
     "functional:FO:classic:01-03",
     "functional:FO:hummingbird:01-03",
     "modules:30-39"
