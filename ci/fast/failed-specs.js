@@ -11,15 +11,22 @@ try {
 }
 
 const failed = new Set();
-const hasFailure = (suite) => (suite.tests || []).some((t) => t.fail || t.state === 'failed')
+const isFailed = (t) => t.fail || t.state === 'failed';
+const hasFailure = (suite) => [...(suite.tests || []), ...(suite.beforeHooks || []), ...(suite.afterHooks || [])].some(isFailed)
   || (suite.failures || []).length > 0
   || (suite.suites || []).some(hasFailure);
 
-for (const root of data.results || []) {
-  if (hasFailure(root) && root.fullFile) {
-    failed.add(root.fullFile);
+// Mochawesome wraps the spec files in a root suite without a file: the file is on its child suites.
+const collect = (suite) => {
+  if (suite.fullFile) {
+    if (hasFailure(suite)) {
+      failed.add(suite.fullFile);
+    }
+    return;
   }
-}
+  (suite.suites || []).forEach(collect);
+};
+(data.results || []).forEach(collect);
 // A failure the report cannot attach to a file (e.g. global hook): rerun everything.
 if (failed.size === 0 && (data.stats?.failures ?? 0) > 0) {
   process.exit(2);
