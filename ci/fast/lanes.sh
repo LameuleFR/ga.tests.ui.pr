@@ -65,6 +65,12 @@ sync_sources() {
   # var/cache is mounted from RAM: the cache clears of BO actions time out on a slow runner disk.
   mkdir -p "$DIR/var/cache" "$CACHE_DIR"
   rsync -a --delete "$ROOT/pristine/var/cache/" "$CACHE_DIR/"
+  # The build warmed the cache on localhost:8002: module caches hold absolute links to it (the
+  # ps_mainmenu menu sends every visitor of another lane to the shop of lane 0). Same-length
+  # rewrite, as for the database dump.
+  if [ "$HTTPS_HOST_PORT" != 8002 ]; then
+    grep -rlZF 'localhost:8002' "$CACHE_DIR" | xargs -0 -r sed -i "s/localhost:8002/localhost:${HTTPS_HOST_PORT}/g"
+  fi
   # Real per-lane copy: the test library resolves the shop root from its own location.
   [ -d "$DIR/tests/UI/node_modules" ] || cp -al "$ROOT/pristine/tests/UI/node_modules" "$DIR/tests/UI/node_modules"
   cp "$DIR/tests/UI/.env.ci" "$DIR/tests/UI/.env"
@@ -218,6 +224,9 @@ lane_env 0
 if ! docker image inspect ps-ci-shop:local > /dev/null 2>&1; then
   LANE_DIR="$ROOT/pristine" dc build prestashop-git > "$RESULTS/image-build.log" 2>&1 || { echo "Image build failed"; tail -50 "$RESULTS/image-build.log"; exit 1; }
 fi
+
+echo "--- build host in the warmed cache: $(grep -rlF 'localhost:8002' "$ROOT/pristine/var/cache" | wc -l) files," \
+  "e.g. $(grep -rlF 'localhost:8002' "$ROOT/pristine/var/cache" | sed "s|$ROOT/pristine/||" | awk 'NR <= 3' | tr '\n' ' ')"
 
 pids=()
 for k in "${!LANES[@]}"; do
