@@ -120,7 +120,10 @@ start_stack() {
   fi
 }
 
-report_stats() { jq -r '"\(.stats.passes // 0)\t\(.stats.failures // 0)\t\(.stats.pending // 0)"' "$1" 2>/dev/null || printf '0\t0\t0'; }
+report_stats() { jq -r '"\(.stats.passes // 0)\t\(.stats.failures // 0)\t\(.stats.pending // 0)\t\(.stats.skipped // 0)"' "$1" 2>/dev/null || printf -- '-\t-\t-\t-'; }
+# lane, campaign, status, minutes, first run passes/failures/pending/skipped, the same for the last
+# rerun, rerun kind, rerun seconds
+NO_RUN=$(printf -- '-\t-\t-\t-')
 
 collect() {   # $1 = result dir of the campaign
   mkdir -p "$1"
@@ -136,11 +139,14 @@ run_mocha() {   # $1 = report name, rest = spec files (none: the whole campaign)
     cd "$DIR/tests/UI" || exit 1
     export MOCHAWESOME_REPORTDIR="$DIR/tests/UI/reports" MOCHAWESOME_REPORTFILENAME="$name"
     export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
-    # First run only: the rerun reports every failure of the files it runs.
-    if [ "$name" = run ] && [ "${RERUN_FAILED:-1}" = 1 ]; then
-      export EXTRA_TEST_PARAMS="--file $CI_FAST_DIR/skip-after-failure.js"
+    # First run only: the loaded spec files for the coverage guard and the rerun order, and the skip
+    # of the steps after a failure (the rerun reports every failure of the files it runs).
+    if [ "$name" = run ]; then
+      export EXTRA_TEST_PARAMS="--file $CI_FAST_DIR/record-files.js"
+      [ "${RERUN_FAILED:-1}" = 1 ] && EXTRA_TEST_PARAMS="$EXTRA_TEST_PARAMS --file $CI_FAST_DIR/skip-after-failure.js"
     fi
     if [ $# -gt 0 ]; then
+      # Explicit spec files (relative to tests/UI, quoted): loaded as given, in this order.
       timeout 75m npx ts-mocha --file utils/setup.ts "$@"
     elif [ -n "$GLOB" ]; then
       TEST_PATH="$GLOB" timeout 75m npm run test:specific
@@ -152,13 +158,13 @@ run_mocha() {   # $1 = report name, rest = spec files (none: the whole campaign)
 
 run_lane() {
   lane_env "$1"
-  local campaigns=$2 rc status files whole t0 slug fresh
+  local campaigns=$2 rc status whole t0 t1 slug fresh actual intended first last prefix specs total rerun_kind rerun_s
   [ -n "$campaigns" ] || return 0
   IFS=',' read -ra CAMPS <<< "$campaigns"
 
   log "preparing (${campaigns})"
   if ! prepare_lane > "$RESULTS/lane-$K-prepare.log" 2>&1; then
-    for c in "${CAMPS[@]}"; do printf '%s\t%s\tsetup-failed\t0\t0\t0\t0\n' "$K" "$c" >> "$RESULTS/lane-$K.tsv"; done
+    for c in "${CAMPS[@]}"; do printf '%s\t%s\tsetup-failed\t0\t%s\t%s\t-\t-\n' "$K" "$c" "$NO_RUN" "$NO_RUN" >> "$RESULTS/lane-$K.tsv"; done
     return 1
   fi
 
@@ -171,51 +177,84 @@ run_lane() {
     # subscriptions... behind them, and a reset only takes about 10 seconds.
     log "starting shop for $CAMPAIGN"
     if ! start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
-      printf '%s\t%s\tsetup-failed\t0\t0\t0\t0\n' "$K" "$CAMPAIGN" >> "$RESULTS/lane-$K.tsv"
+      printf '%s\t%s\tsetup-failed\t0\t%s\t%s\t-\t-\n' "$K" "$CAMPAIGN" "$NO_RUN" "$NO_RUN" >> "$RESULTS/lane-$K.tsv"
       continue
     fi
     if in_list needs_keycloak "$CAMPAIGN"; then
       timeout 300 bash -c 'until curl -s -o /dev/null http://localhost:8003/; do sleep 3; done'
     fi
     rm -rf "$DIR/tests/UI/reports" "$DIR/tests/UI/screenshots"
+    # The spec files the campaign must run, in load order (see campaign-specs.js).
+    mkdir -p "$RESULTS/$slug"
+    actual="$RESULTS/$slug/specs-actual.txt"; intended="$RESULTS/$slug/specs-intended.txt"
+    node "$CI_FAST_DIR/campaign-specs.js" "$DIR/tests/UI" "$CONF" "$CAMPAIGN" "$actual" "$intended" > "$RESULTS/$slug/specs.log" 2>&1 \
+      || rm -f "$actual" "$intended"
     log "running $CAMPAIGN"
     run_mocha run > "$RESULTS/lane-$K-$slug.log" 2>&1
     rc=$?
     status=$([ $rc = 0 ] && echo passed || echo failed)
+    first=$(report_stats "$DIR/tests/UI/reports/run.json")
+    rerun_kind=-; rerun_s=-
 
-    if [ $rc != 0 ] && [ "${RERUN_FAILED:-1}" = 1 ]; then
-      files=$(node "$CI_FAST_DIR/failed-specs.js" "$DIR/tests/UI/reports/run.json")
-      whole=$?
+    # Coverage guard: every spec file of the campaign must have been loaded by the first run.
+    node "$CI_FAST_DIR/spec-order.js" coverage "$DIR/tests/UI/reports/run.json" "$actual" "$intended" "$DIR/tests/UI" \
+      "$DIR/tests/UI/reports/run-files.json" > "$RESULTS/$slug/coverage.txt" 2>&1
+    case $? in
+      0) ;;
+      1) status=missing-specs
+         echo "::error::$CAMPAIGN: the first run did not load every spec file of the campaign: $(grep -c '^coverage error' "$RESULTS/$slug/coverage.txt") error(s), see the coverage lines of the job log" ;;
+      *) echo "::warning::$CAMPAIGN: spec file coverage not fully checked: $(grep -m1 '^coverage warning' "$RESULTS/$slug/coverage.txt")" ;;
+    esac
+
+    if [ $status = failed ] && [ "${RERUN_FAILED:-1}" = 1 ]; then
+      # The verdict rerun replays the campaign from its first spec file up to the last failed one,
+      # in the order of the first run, so that a failure caused by what earlier files left behind
+      # shows again. Whole campaign when the failed files or their order are not certain.
+      specs=()
+      prefix=$(node "$CI_FAST_DIR/spec-order.js" prefix "$DIR/tests/UI/reports/run.json" "$actual" "$DIR/tests/UI" \
+        "$DIR/tests/UI/reports/run-files.json" 2>> "$RESULTS/lane-$K-$slug.log")
+      if [ $? = 0 ] && [ -n "$prefix" ]; then
+        mapfile -t specs <<< "$prefix"
+      fi
+      total=$(cat "$actual" 2>/dev/null | grep -c .)
+      if [ ${#specs[@]} = 0 ]; then
+        whole=2; rerun_kind=whole
+      elif [ ${#specs[@]} = "$total" ]; then
+        whole=1; rerun_kind="whole-list-$total"
+      else
+        whole=0; rerun_kind="prefix-${#specs[@]}/$total"
+      fi
       collect "$RESULTS/$slug/first-run"
-      log "$CAMPAIGN failed, rerunning $([ $whole = 0 ] && echo "$(echo "$files" | grep -c .) spec file(s)" || echo 'the whole campaign') on a fresh shop"
+      log "$CAMPAIGN failed, rerunning on a fresh shop: $rerun_kind"
+      t1=$SECONDS
       if start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
         rm -rf "$DIR/tests/UI/reports" "$DIR/tests/UI/screenshots"
-        if [ $whole = 0 ] && [ -n "$files" ]; then
-          mapfile -t specs <<< "$files"
-          run_mocha rerun "${specs[@]}" >> "$RESULTS/lane-$K-$slug.log" 2>&1
-        else
-          whole=2
+        if [ $whole = 2 ]; then
           run_mocha rerun >> "$RESULTS/lane-$K-$slug.log" 2>&1
+        else
+          run_mocha rerun "${specs[@]}" >> "$RESULTS/lane-$K-$slug.log" 2>&1
         fi
         [ $? = 0 ] && status=flaky
       fi
-      # A spec file may depend on the files run before it: before reporting a failure, rerun the
-      # whole campaign once, which is what a retry of pr_test_one does.
+      rerun_s=$((SECONDS - t1))
+      # Last attempt, as a retry of pr_test_one: the whole campaign once more.
       if [ $status = failed ] && [ $whole = 0 ]; then
-        collect "$RESULTS/$slug/files-rerun"
+        collect "$RESULTS/$slug/prefix-rerun"
         log "$CAMPAIGN still failing, rerunning the whole campaign on a fresh shop"
+        t1=$SECONDS
         if start_stack "$([ $fresh = 1 ] && echo fresh || echo installed)" >> "$RESULTS/lane-$K-setup.log" 2>&1; then
           rm -rf "$DIR/tests/UI/reports" "$DIR/tests/UI/screenshots"
           run_mocha rerun >> "$RESULTS/lane-$K-$slug.log" 2>&1 && status=flaky
         fi
+        rerun_kind="$rerun_kind+whole"; rerun_s="$rerun_s+$((SECONDS - t1))"
       fi
     fi
 
     collect "$RESULTS/$slug"
-    local report="$DIR/tests/UI/reports/run.json"
-    [ -f "$DIR/tests/UI/reports/rerun.json" ] && report="$DIR/tests/UI/reports/rerun.json"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$K" "$CAMPAIGN" "$status" "$(( (SECONDS - t0) / 60 ))" "$(report_stats "$report")" >> "$RESULTS/lane-$K.tsv"
-    log "$CAMPAIGN $status in $(( (SECONDS - t0) / 60 )) min"
+    last=$NO_RUN
+    [ -f "$DIR/tests/UI/reports/rerun.json" ] && last=$(report_stats "$DIR/tests/UI/reports/rerun.json")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$K" "$CAMPAIGN" "$status" "$(( (SECONDS - t0) / 60 ))" "$first" "$last" "$rerun_kind" "$rerun_s" >> "$RESULTS/lane-$K.tsv"
+    log "$CAMPAIGN $status in $(( (SECONDS - t0) / 60 )) min (first run $first, rerun $rerun_kind $last)"
   done
   dc rm -s -f > /dev/null 2>&1
 }
@@ -244,17 +283,25 @@ done
 for p in "${pids[@]}"; do wait "$p"; done
 
 cat "$RESULTS"/lane-*.tsv > "$RESULTS/summary.tsv" 2>/dev/null
+# Counts of the first run (the coverage of the campaign) and of the last rerun, side by side.
 {
-  echo "| Lane | Campaign | Result | Minutes | Passing | Failing | Pending |"
+  echo "| Lane | Campaign | Result | Minutes | First run: passing / failing / pending / skipped | Rerun | Rerun: passing / failing / pending / skipped |"
   echo "|---|---|---|---|---|---|---|"
   awk -F'\t' '{icon = ($3 == "passed") ? "✅" : ($3 == "flaky") ? "🟡 flaky (passed on rerun)" : "❌ " $3;
-               printf "| %s | `%s` | %s | %s | %s | %s | %s |\n", $1, $2, icon, $4, $5, $6, $7}' "$RESULTS/summary.tsv"
+               rerun = ($13 == "-") ? "" : $13 " (" $14 " s)";
+               last = ($9 == "-") ? "" : $9 " / " $10 " / " $11 " / " $12;
+               printf "| %s | `%s` | %s | %s | %s / %s / %s / %s | %s | %s |\n", $1, $2, icon, $4, $5, $6, $7, $8, rerun, last}' "$RESULTS/summary.tsv"
 } > "$RESULTS/summary.md"
 cat "$RESULTS/summary.md"
 
 # Diagnostics in the job log, so that a run can be analysed without downloading its artifacts.
+echo "--- shell of npm scripts: sh = $(readlink -f "$(command -v sh)"), npm script-shell = $(npm config get script-shell 2>/dev/null)"
+awk -F'\t' '{printf "--- %s: %s, first run %s passing / %s failing / %s pending / %s skipped", $2, $3, $5, $6, $7, $8;
+             if ($13 != "-") printf "; rerun %s in %s s: %s passing / %s failing / %s pending / %s skipped", $13, $14, $9, $10, $11, $12;
+             printf "\n"}' "$RESULTS/summary.tsv"
 for d in "$RESULTS"/*/; do
   c=$(basename "$d")
+  [ -f "$d/coverage.txt" ] && sed "s/^/--- $c: /" "$d/coverage.txt"
   if [ -f "$d/first-run/run.json" ]; then
     echo "--- $c: failures of the first run"
     node "$CI_FAST_DIR/print-failures.js" "$d/first-run/run.json"

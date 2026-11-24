@@ -4,7 +4,9 @@ name: Testing PrestaShop pull requests (fast)
 # - each test job runs several isolated shops at once (one lane each) to use the 4 vCPU;
 # - long campaigns are split, campaigns are packed per lane by their measured duration;
 # - throwaway database tuning (datadir in RAM, no fsync/binlog), PHP opcache and Apache tuning;
-# - a failed campaign reruns only its failed spec files on a reset shop, inside the same job.
+# - a failed campaign reruns, on a reset shop inside the same job, its spec files from the first one
+#   up to the last failed one in the order of the first run, then the whole campaign if still failing;
+# - every first run is checked to have loaded all the spec files of its campaign.
 on:
   workflow_dispatch:
     inputs:
@@ -40,7 +42,7 @@ on:
         default: '2'
       RERUN_FAILED:
         type: boolean
-        description: Rerun the failed spec files of a campaign once, on a reset shop
+        description: Rerun a failed campaign up to its last failed spec file, then whole, on a reset shop
         default: true
       UI_TESTING_LIBRARY_REF:
         description: Optional ui-testing-library to install instead of the locked one (e.g. github:owner/ui-testing-library#branch)
