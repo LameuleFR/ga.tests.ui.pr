@@ -1,5 +1,5 @@
 {
-  "_doc": "Test minutes per campaign (pr_test_one median job duration minus ~5.6 min of setup, stats branch, Aug-Oct 2026). Used only to balance lanes; unknown campaigns count as default_minutes. 'splits' replace a long campaign by several TEST_PATH globs whose union must equal the original glob (checked at run time). 'slot0' campaigns must run on lane 0 of a job: they hard-code localhost:8002, localhost:3306, the 172.18.0.1 gateway of the first docker network, or need the single keycloak of the runner. 'solo' campaigns get a job with a single lane (chained with other solo campaigns while they fit): their slowest requests (cache clears in PHP CLI subprocesses) came within 3.5-7 s of the 30 s test timeouts on 2-lane jobs; a solo campaign that is also in slot0 is on lane 0 by construction.",
+  "_doc": "Test minutes per campaign (pr_test_one median job duration minus ~5.6 min of setup, stats branch, Aug-Oct 2026). Used only to balance lanes; unknown campaigns count as default_minutes. 'splits' replace a long campaign by several TEST_PATH globs that must load, together and once each, the spec files of the original campaign (check_splits.py, in the build job). TEST_PATH goes unquoted through /bin/sh before mocha: a part glob must hold a brace group so that dash leaves it to mocha's glob, where `**` is recursive (dash expands `a/**/*` as `a/*/*`, which dropped the 3 spec files directly in 07_discounts/01_cartRules). 'slot0' campaigns must run on lane 0 of a job: they hard-code localhost:8002, localhost:3306, the 172.18.0.1 gateway of the first docker network, or need the single keycloak of the runner. 'solo' campaigns get a job with a single lane (chained with other solo campaigns while they fit): their slowest requests (cache clears in PHP CLI subprocesses) came within 3.5-7 s of the 30 s test timeouts on 2-lane jobs; a solo campaign that is also in slot0 is on lane 0 by construction.",
   "default_minutes": 15,
   "minutes": {
     "audit": 13.6,
@@ -16,7 +16,7 @@
     "functional:BO:catalog:01-02": 18.8,
     "functional:BO:catalog:03-04": 15.3,
     "functional:BO:catalog:05-06": 5.7,
-    "functional:BO:catalog:07-cart-rules": 21.6,
+    "functional:BO:catalog:07-cart-rules": 25.7,
     "functional:BO:catalog:07-08-rest": 24.3,
     "functional:BO:customer:01": 6.7,
     "functional:BO:customer:02-03": 8.9,
@@ -61,7 +61,7 @@
       "functional:FO:classic:10-12": "functional/FO/classic/{10,11,12}*/**/*"
     },
     "functional:BO:catalog:07-08": {
-      "functional:BO:catalog:07-cart-rules": "functional/BO/03_catalog/07*/01*/**/*",
+      "functional:BO:catalog:07-cart-rules": "functional/BO/03_catalog/07*/01*/{**/*,*.ts}",
       "functional:BO:catalog:07-08-rest": "functional/BO/03_catalog/{07*/0{2,3}*,08*}/**/*"
     }
   },
