@@ -21,14 +21,26 @@ def main():
     minutes = {c: conf['minutes'].get(c, conf['default_minutes']) for c in items}
     # Lanes share 4 vCPU: assume campaigns run a bit slower than alone.
     factor = 1.0 if n_lanes == 1 else 1.05 if n_lanes == 2 else 1.15 if n_lanes == 3 else 1.3
-    slot0 = [c for c in items if c in conf['slot0']]
-    others = [c for c in items if c not in conf['slot0']]
-
-    total = sum(minutes.values()) * factor
     longest = max(minutes.values()) * factor
     if target <= 0:
         target = max(longest, 27.0)
-    jobs = max(1, math.ceil(total / (n_lanes * target)))
+
+    # Campaigns whose requests come closest to the 30 s test timeouts get a runner with no other
+    # lane: one lane per job, chained while they fit in the target.
+    solo = [c for c in items if n_lanes > 1 and c in conf.get('solo', [])]
+    solo_jobs = math.ceil(sum(minutes[c] for c in solo) / target)
+    solo_lanes = [[] for _ in range(solo_jobs)]
+    solo_load = [0.0] * solo_jobs
+    for c in sorted(solo, key=lambda c: -minutes[c]):
+        j = min(range(solo_jobs), key=lambda j: solo_load[j])
+        solo_lanes[j].append(c)
+        solo_load[j] += minutes[c]
+
+    rest = [c for c in items if c not in solo]
+    slot0 = [c for c in rest if c in conf['slot0']]
+    others = [c for c in rest if c not in conf['slot0']]
+    total = sum(minutes[c] for c in rest) * factor
+    jobs = max(1, math.ceil(total / (n_lanes * target))) if rest else 0
     # Lane 0 is the only one bound to localhost:8002 / :3306 and the runner's keycloak.
     jobs = max(jobs, math.ceil(sum(minutes[c] for c in slot0) * factor / target))
 
@@ -47,6 +59,13 @@ def main():
         put(j, k, c)
 
     include = []
+    for j in range(solo_jobs):
+        include.append({
+            'job': len(include) + 1,
+            'lanes': ','.join(solo_lanes[j]),
+            'keycloak': any(c in conf['needs_keycloak'] for c in solo_lanes[j]),
+            'estimate': round(solo_load[j]),
+        })
     for j in range(jobs):
         used = [l for l in lanes[j] if l]
         if not used:
@@ -61,8 +80,8 @@ def main():
         })
     print(json.dumps({'include': include}))
     est = max(i['estimate'] for i in include)
-    print(f'{len(items)} campaigns, {jobs} jobs x {n_lanes} lanes, longest lane ~{est} min, '
-          f'test work ~{round(total)} min', file=sys.stderr)
+    print(f'{len(items)} campaigns, {jobs} jobs x {n_lanes} lanes + {solo_jobs} solo jobs, '
+          f'longest lane ~{est} min, test work ~{round(total + sum(solo_load))} min', file=sys.stderr)
 
 
 if __name__ == '__main__':
