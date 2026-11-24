@@ -36,10 +36,15 @@ timeout 900 bash -c 'until [ "$(curl -sk -L -o /dev/null -w "%{http_code}" https
 
 # Build every kernel's prod cache now, once, instead of in the first test of every job.
 # As www-data: root-owned cache files would break the cache clears done by module actions.
+warmups=""
 for app in admin front admin-api; do
+  t0=$(date +%s.%N)
   dc exec -T -u www-data prestashop-git php -d memory_limit=-1 bin/console cache:warmup --env=prod --no-debug --app-id=$app \
     || echo "::warning::cache warmup failed for $app"
+  warmups="$warmups, $app $(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f", b - a}')s"
 done
+# Runner speed at a glance: the same warmups are what module actions redo in the test jobs.
+echo "--- build: $(nproc) CPUs, $(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo), cache warmup${warmups#,}"
 # Front and back office pages once, to fill the Smarty/asset caches the same way for everyone.
 curl -sk -A Googlebot -o /dev/null https://localhost:8002/en/ || true
 curl -sk -A Googlebot -o /dev/null https://localhost:8002/admin-dev/ || true

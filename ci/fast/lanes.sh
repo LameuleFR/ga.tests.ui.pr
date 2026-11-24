@@ -70,6 +70,8 @@ sync_sources() {
   # rewrite, as for the database dump.
   if [ "$HTTPS_HOST_PORT" != 8002 ]; then
     grep -rlZF 'localhost:8002' "$CACHE_DIR" | xargs -0 -r sed -i "s/localhost:8002/localhost:${HTTPS_HOST_PORT}/g"
+    echo "lane $K: cache rewrite to localhost:${HTTPS_HOST_PORT}: $(grep -rlF 'localhost:8002' "$CACHE_DIR" | wc -l) files still" \
+      "with localhost:8002, $(grep -rlF "localhost:${HTTPS_HOST_PORT}" "$CACHE_DIR" | wc -l) with localhost:${HTTPS_HOST_PORT}" >> "$RESULTS/lane-$K-rewrite.log"
   fi
   # Real per-lane copy: the test library resolves the shop root from its own location.
   [ -d "$DIR/tests/UI/node_modules" ] || cp -al "$ROOT/pristine/tests/UI/node_modules" "$DIR/tests/UI/node_modules"
@@ -264,12 +266,14 @@ for d in "$RESULTS"/*/; do
   fi
   for timing in "$d/first-run/var-logs/apache-timing.log" "$d/var-logs/apache-timing.log"; do
     [ -f "$timing" ] || continue
-    awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s\n", c, $NF / 1000000, $3, substr($4, 1, 90)}' "$timing"
+    # Start time of the request (shop time zone), to match it with what the other lanes were doing.
+    awk -v c="$c" '$NF > 20000000 {printf "--- %s: slow request %ds %s %s at %s\n", c, $NF / 1000000, $3, substr($4, 1, 90), substr($1, 14) " " substr($2, 1, 5)}' "$timing"
     # The 3 slowest requests whatever their duration, to measure the margin below the test timeouts
-    awk '{printf "%d\t%s\t%s\n", $NF, $3, substr($4, 1, 90)}' "$timing" | sort -rn | awk 'NR <= 3' \
-      | awk -F'\t' -v c="$c" '{printf "--- %s: slowest %.1fs %s %s\n", c, $1 / 1000000, $2, $3}'
+    awk '{printf "%d\t%s\t%s\t%s\n", $NF, $3, substr($4, 1, 90), substr($1, 14) " " substr($2, 1, 5)}' "$timing" | sort -rn | awk 'NR <= 3' \
+      | awk -F'\t' -v c="$c" '{printf "--- %s: slowest %.1fs %s %s at %s\n", c, $1 / 1000000, $2, $3, $4}'
   done
 done
+sort "$RESULTS"/lane-*-rewrite.log 2>/dev/null | uniq -c | awk '{n = $1; sub(/^ *[0-9]+ /, ""); printf "--- %s (%d syncs)\n", $0, n}'
 echo "--- runner: $(nproc) CPUs, $(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
 awk 'NR > 2 && $1 ~ /^[0-9]+$/ {n++; r += $1; id += $15; wa += $16; st += $17; if ($1 > m) m = $1}
      END {if (n) printf "--- CPU: run queue avg %.1f / max %d, idle %.0f%%, iowait %.0f%%, steal %.0f%%\n", r / n, m, id / n, wa / n, st / n}' /tmp/mon/vmstat.log 2>/dev/null
