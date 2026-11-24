@@ -321,6 +321,21 @@ for d in "$RESULTS"/*/; do
   done
 done
 sort "$RESULTS"/lane-*-rewrite.log 2>/dev/null | uniq -c | awk '{n = $1; sub(/^ *[0-9]+ /, ""); printf "--- %s (%d syncs)\n", $0, n}'
+# Requests that reached the shop of a lane with the host of another lane: a link or a cache entry
+# pointing to the wrong shop (expected 0). The Host header is the field before the duration.
+for k in "${!LANES[@]}"; do
+  logs=()
+  IFS=',' read -ra cs <<< "${LANES[$k]}"
+  for c in "${cs[@]}"; do
+    while IFS= read -r -d '' f; do logs+=("$f"); done < <(find "$RESULTS/${c//:/-}" -name apache-timing.log -print0 2>/dev/null)
+  done
+  [ ${#logs[@]} -gt 0 ] || continue
+  awk -v k="$k" '{n++; h = $(NF - 1)
+                  if (h == "localhost:80" k "1" || h == "localhost:80" k "2") own++
+                  else if (h ~ /^localhost:80[0-9][12]$/) {other++; hosts[h]++}}
+       END {s = ""; for (h in hosts) s = s " " h "=" hosts[h]
+            printf "--- lane %s: %d requests with the host of another lane (expected 0)%s; %d with its own host, %d in all\n", k, other, s, own, n}' "${logs[@]}"
+done
 echo "--- runner: $(nproc) CPUs, $(awk -F': ' '/^model name/ {print $2; exit}' /proc/cpuinfo)"
 awk 'NR > 2 && $1 ~ /^[0-9]+$/ {n++; r += $1; id += $15; wa += $16; st += $17; if ($1 > m) m = $1}
      END {if (n) printf "--- CPU: run queue avg %.1f / max %d, idle %.0f%%, iowait %.0f%%, steal %.0f%%\n", r / n, m, id / n, wa / n, st / n}' /tmp/mon/vmstat.log 2>/dev/null

@@ -51,6 +51,16 @@ curl -sk -A Googlebot -o /dev/null https://localhost:8002/admin-dev/ || true
 
 mkdir -p "$ROOT/shop-artifacts"
 dc exec -T db $DUMP -uroot -pprestashop --single-transaction --skip-dump-date prestashop > "$ROOT/shop-artifacts/db_dump.sql"
+
+# Where the build host is written: the test jobs rewrite it in the dump, the warmed cache and
+# .htaccess only. Anything else would send the browser of another lane to the shop of lane 0.
+host_re='localhost(:|%3A)8002'
+t0=$SECONDS
+files=$(cd "$ROOT/pristine" && find . \( -path ./var/cache -o -name node_modules -o -name vendor -o -name tests -o -name .git \) -prune \
+  -o -type f -print0 | xargs -0 grep -lIE "$host_re" 2>/dev/null || true)
+echo "--- build host outside var/cache: $(printf '%s' "$files" | grep -c .) files ($((SECONDS - t0)) s), e.g. $(printf '%s\n' "$files" | awk 'NR <= 5' | tr '\n' ' ')"
+echo "--- build host in the SQL dump: $(grep -cE "$host_re" "$ROOT/shop-artifacts/db_dump.sql" || true) lines," \
+  "$(grep -oE "$host_re" "$ROOT/shop-artifacts/db_dump.sql" | wc -l) occurrences"
 dc rm -s -f
 sudo rm -rf "$DB_DATADIR"
 
